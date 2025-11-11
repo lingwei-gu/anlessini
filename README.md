@@ -89,3 +89,94 @@ Now we can try invoking our function:
 $ export API_URL=$(aws cloudformation describe-stacks --stack-name cord19 --query "Stacks[0].Outputs[?OutputKey=='SearchApiUrl'].OutputValue" --output text)
 $ curl $API_URL\?query\=incubation\&max_docs\=3
 ```
+
+## Local Usage
+
+Anlessini can also run completely locally, supporting both local filesystem indexes and S3-based indexes. This is useful for comparing latency between completely local execution vs. local execution with an S3 index.
+
+### Building the Project
+
+```bash
+$ mvn clean install
+```
+
+### Generating an Index Locally
+
+To generate an index locally, use Anserini's `IndexCollection` tool. You'll need to have [Anserini](https://github.com/castorini/anserini) installed and built.
+
+**Example for MS MARCO Passage:**
+
+```bash
+# First, build Anserini
+$ cd /path/to/anserini
+$ mvn clean package appassembler:assemble
+
+# Download the collection (if needed)
+# ... download your collection files ...
+
+# Build the index
+$ target/appassembler/bin/IndexCollection \
+  -collection MsMarcoPassageCollection \
+  -generator DefaultLuceneDocumentGenerator \
+  -threads 8 \
+  -input collections/msmarco-passage \
+  -index indexes/msmarco-passage/lucene-index-msmarco \
+  -storeDocvectors -storePositions -storeRaw
+```
+
+**Example for other collections:**
+
+For different collections, refer to [Anserini's documentation](https://github.com/castorini/anserini) for the appropriate collection type and generator. Common options:
+
+- `-collection`: Collection type (e.g., `MsMarcoPassageCollection`, `Cord19AbstractCollection`, `JsonCollection`)
+- `-generator`: Document generator (e.g., `DefaultLuceneDocumentGenerator`, `Cord19Generator`)
+- `-threads`: Number of indexing threads
+- `-input`: Path to your collection files
+- `-index`: Output path for the index
+- `-storeDocvectors`: Store document vectors (needed for some retrieval models)
+- `-storePositions`: Store term positions (needed for phrase queries)
+- `-storeRaw`: Store raw document content (increases index size)
+
+**Note:** For local search comparison, you typically want to keep the index minimal (don't use `-storeContents` or `-storeRaw` unless needed) to keep the index size small and speed up queries.
+
+### Running Local Search
+
+The `LocalSearchCollection` class provides a command-line interface compatible with Anserini's `SearchCollection`, but with support for S3 paths:
+
+**Using a local index:**
+```bash
+$ ./bin/run.sh io.anserini.search.SearchCollection \
+  -index indexes/msmarco-passage/lucene-index-msmarco \
+  -topics collections/msmarco-passage/queries.dev.small.tsv \
+  -topicReader TsvInt \
+  -output runs/run.msmarco-passage.dev.bm25.tsv \
+  -format msmarco \
+  -parallelism 4 \
+  -bm25 -bm25.k1 0.82 -bm25.b 0.68 -hits 1000
+```
+
+**Using an S3 index:**
+```bash
+$ ./bin/run.sh io.anserini.search.SearchCollection \
+  -index s3://my-bucket/indexes/msmarco-passage/lucene-index-msmarco \
+  -topics collections/msmarco-passage/queries.dev.small.tsv \
+  -topicReader TsvInt \
+  -output runs/run.msmarco-passage.dev.bm25.tsv \
+  -format msmarco \
+  -parallelism 4 \
+  -bm25 -bm25.k1 0.82 -bm25.b 0.68 -hits 1000
+```
+
+Note: The `run.sh` script automatically uses `LocalSearchCollection` (which supports S3 paths) when you specify `io.anserini.search.SearchCollection`. You can also directly use `io.anlessini.LocalSearchCollection` if preferred.
+
+### Uploading an Index to S3
+
+To upload a local index to S3 for testing:
+
+```bash
+$ ./bin/upload-index-to-s3.sh indexes/msmarco-passage/lucene-index-msmarco s3://my-bucket/indexes/msmarco-passage/lucene-index-msmarco
+```
+
+This allows you to compare the latency difference between:
+- **Completely local**: Index on local filesystem
+- **Local with S3 index**: Index stored in S3, but search runs locally

@@ -14,3 +14,9 @@ artifact-bucket.txt
 
 # default directory where CloudFormation output template goes to
 cloudformation/
+
+collections/
+
+indexes/
+
+runs/

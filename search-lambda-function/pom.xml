@@ -24,6 +24,10 @@
               <mainClass>io.anlessini.SearchDemo</mainClass>
               <id>SearchDemo</id>
             </program>
+            <program>
+              <mainClass>io.anlessini.LocalSearchCollection</mainClass>
+              <id>LocalSearchCollection</id>
+            </program>
           </programs>
         </configuration>
         <executions>
