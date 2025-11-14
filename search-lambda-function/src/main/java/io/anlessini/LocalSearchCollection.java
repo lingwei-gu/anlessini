@@ -3,7 +3,7 @@ package io.anlessini;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import io.anlessini.store.S3Directory;
-import io.anserini.index.IndexArgs;
+import io.anlessini.IndexArgs;
 import io.anserini.search.query.BagOfWordsQueryGenerator;
 import io.anserini.search.topicreader.TopicReader;
 import org.apache.commons.lang3.time.DurationFormatUtils;

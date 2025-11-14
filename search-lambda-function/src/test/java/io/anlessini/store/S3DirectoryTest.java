@@ -3,7 +3,7 @@ package io.anlessini.store;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3ClientBuilder;
 import com.amazonaws.services.s3.model.PutObjectResult;
-import io.anserini.index.IndexArgs;
+import io.anlessini.IndexArgs;
 import io.anserini.search.query.BagOfWordsQueryGenerator;
 import org.apache.lucene.analysis.Analyzer;
 import org.apache.lucene.analysis.en.EnglishAnalyzer;

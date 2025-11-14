@@ -12,7 +12,7 @@ import com.google.common.base.Utf8;
 import io.anserini.collection.DocumentCollection;
 import io.anserini.collection.FileSegment;
 import io.anserini.collection.SourceDocument;
-import io.anserini.index.IndexArgs;
+import io.anlessini.IndexArgs;
 import io.anserini.index.generator.*;
 import org.apache.commons.lang3.time.DurationFormatUtils;
 import org.apache.commons.pool2.BasePooledObjectFactory;
