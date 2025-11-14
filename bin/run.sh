@@ -25,8 +25,12 @@ shift
 # io.anserini.search.SearchCollection -> LocalSearchCollection (use our version for S3 support)
 EXEC_NAME="${CLASS_NAME##*.}"
 
-# Check if this is an Anserini tool
-if [[ "$CLASS_NAME" =~ ^io\.anserini\. ]]; then
+# Special case: always use our LocalSearchCollection for SearchCollection (supports S3 and local)
+if [ "$CLASS_NAME" = "io.anserini.search.SearchCollection" ]; then
+  EXEC_NAME="LocalSearchCollection"
+  SEARCH_EXEC="$PROJECT_DIR/search-lambda-function/target/appassembler/bin/$EXEC_NAME"
+# Check if this is another Anserini tool (like IndexCollection)
+elif [[ "$CLASS_NAME" =~ ^io\.anserini\. ]]; then
   # Try to find Anserini in common locations
   ANSERINI_PATHS=(
     "../anserini"
@@ -47,20 +51,14 @@ if [[ "$CLASS_NAME" =~ ^io\.anserini\. ]]; then
     echo "Error: Anserini not found. Please either:"
     echo "  1. Clone Anserini in a sibling directory (../anserini)"
     echo "  2. Set ANSERINI_HOME environment variable to your Anserini path"
-    echo "  3. Or run IndexCollection directly from your Anserini directory:"
+    echo "  3. Or run $EXEC_NAME directly from your Anserini directory:"
     echo "     cd /path/to/anserini"
     echo "     target/appassembler/bin/$EXEC_NAME $*"
     exit 1
   fi
   
-  # Special case: use our LocalSearchCollection for SearchCollection (supports S3)
-  if [ "$CLASS_NAME" = "io.anserini.search.SearchCollection" ]; then
-    EXEC_NAME="LocalSearchCollection"
-    SEARCH_EXEC="$PROJECT_DIR/search-lambda-function/target/appassembler/bin/$EXEC_NAME"
-  else
-    # Use Anserini's tool
-    SEARCH_EXEC="$ANSERINI_DIR/target/appassembler/bin/$EXEC_NAME"
-  fi
+  # Use Anserini's tool
+  SEARCH_EXEC="$ANSERINI_DIR/target/appassembler/bin/$EXEC_NAME"
 else
   # It's an anlessini tool
   SEARCH_EXEC="$PROJECT_DIR/search-lambda-function/target/appassembler/bin/$EXEC_NAME"
