@@ -12,6 +12,7 @@ import org.apache.lucene.store.BufferedIndexInput;
 
 import java.io.EOFException;
 import java.io.IOException;
+import java.nio.ByteBuffer;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.PriorityQueue;
@@ -94,7 +95,9 @@ public class S3IndexInput extends BufferedIndexInput {
   }
 
   @Override
-  protected void readInternal(byte[] dst, final int offset, final int length) throws IOException {
+  protected void readInternal(ByteBuffer dst) throws IOException {
+    final int length = dst.remaining();
+    final int offset = dst.position();
     final long startPos = getFilePointer() + this.off;
     final long endPos = startPos + length;
 
@@ -147,7 +150,10 @@ public class S3IndexInput extends BufferedIndexInput {
       long blockStart = fb.offset, blockEnd = fb.offset + fb.length();
       int toRead = Math.toIntExact(Math.min(blockEnd, endPos) - Math.max(blockStart, startPos));
       int srcOffset = Math.toIntExact(Math.max(0, startPos - blockStart));
-      System.arraycopy(src, srcOffset, dst, dstOffset, toRead);
+      
+      // Use ByteBuffer.put() instead of System.arraycopy()
+      dst.position(dstOffset);
+      dst.put(src, srcOffset, toRead);
 
       dstOffset += toRead;
       bytesRead += toRead;

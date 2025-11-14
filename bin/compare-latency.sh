@@ -194,3 +194,4 @@ echo "For detailed query-level timing, check the logs:"
 echo "  Local: /tmp/local_search.log"
 echo "  S3:    /tmp/s3_search.log"
 
+
