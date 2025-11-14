@@ -35,7 +35,7 @@
     <revision>0.1.0-SNAPSHOT</revision>
     <lucene.version>9.8.0</lucene.version>
     <amazon.aws.sdk.version>1.11.848</amazon.aws.sdk.version>
-    <anserini.version>0.9.4</anserini.version>
+    <anserini.version>1.1.1</anserini.version>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
   </properties>
 
