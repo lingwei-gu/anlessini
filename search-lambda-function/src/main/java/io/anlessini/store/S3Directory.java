@@ -136,7 +136,17 @@ public class S3Directory extends BaseDirectory {
 
   @Override
   public IndexInput openInput(String name, IOContext context) throws IOException {
-    return new S3IndexInput(s3Client, objectSummaries.get(name));
+    LOG.info("S3Directory.openInput() - Opening file: " + name);
+    S3ObjectSummary summary = objectSummaries.get(name);
+    if (summary == null) {
+      LOG.error("S3Directory.openInput() - File not found in objectSummaries: " + name);
+      LOG.error("S3Directory.openInput() - Available files: " + Arrays.toString(objectSummaries.keySet().toArray(new String[0])));
+      throw new IOException("File not found: " + name);
+    }
+    LOG.info("S3Directory.openInput() - Found file: " + name + ", size: " + summary.getSize() + ", key: " + summary.getKey());
+    S3IndexInput input = new S3IndexInput(s3Client, summary);
+    LOG.info("S3Directory.openInput() - Created S3IndexInput for: " + name);
+    return input;
   }
 
   @Override

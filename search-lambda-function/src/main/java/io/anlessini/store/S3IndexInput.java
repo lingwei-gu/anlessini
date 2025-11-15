@@ -101,11 +101,13 @@ public class S3IndexInput extends BufferedIndexInput {
     final long startPos = getFilePointer() + this.off;
     final long endPos = startPos + length;
 
+    LOG.info("[readInternal][" + summary.getKey() + "] Starting read @ " + startPos + ":" + length);
+
     if (startPos + length > end) {
       throw new EOFException("reading past EOF: " + toString() + "@" + hashCode());
     }
 
-    LOG.trace("[read][" + summary.getKey() + "] @" + startPos + ":" + length);
+    LOG.debug("[read][" + summary.getKey() + "] @" + startPos + ":" + length);
     final PriorityQueue<S3FileBlock> fileBlocks = S3FileBlock.of(summary, startPos, length);
     final Map<S3FileBlock, byte[]> cacheBlocks = new HashMap<>();
     final MinMaxPriorityQueue<S3FileBlock> cacheMisses = MinMaxPriorityQueue.create();
