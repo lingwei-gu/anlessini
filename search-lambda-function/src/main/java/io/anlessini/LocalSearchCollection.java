@@ -116,7 +116,17 @@ public class LocalSearchCollection<K> implements Closeable {
       LOG.info("Opening local index: " + args.index);
       directory = FSDirectory.open(Paths.get(args.index));
     }
+    LOG.info("Opening DirectoryReader - this may take a while as it reads index metadata from S3...");
+    // Disable caching during index opening to avoid caching metadata reads
+    io.anlessini.store.S3IndexInput.disableCaching();
+    long openStart = System.currentTimeMillis();
     this.reader = DirectoryReader.open(directory);
+    long openTime = System.currentTimeMillis() - openStart;
+    LOG.info("DirectoryReader opened successfully in " + openTime + " ms. Index has " + reader.numDocs() + " documents.");
+    
+    // Enable caching for query execution
+    io.anlessini.store.S3IndexInput.enableCaching();
+    LOG.info("Caching enabled for query execution");
 
     // Set similarity
     if (args.bm25) {
@@ -159,6 +169,7 @@ public class LocalSearchCollection<K> implements Closeable {
   }
 
   public void runTopics() {
+    LOG.info("Starting to process " + topics.size() + " topics with " + args.threads + " threads");
     final long start = System.nanoTime();
     final ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(args.threads);
     final IndexSearcher searcher = new IndexSearcher(reader);
@@ -168,11 +179,13 @@ public class LocalSearchCollection<K> implements Closeable {
     final Sort BREAK_SCORE_TIES_BY_DOCID =
         new Sort(SortField.FIELD_SCORE, new SortField(IndexArgs.ID, SortField.Type.STRING_VAL));
 
+    LOG.info("Submitting " + topics.size() + " queries to thread pool");
     for (Map.Entry<K, Map<String, String>> topicEntry : topics.entrySet()) {
       final K qid = topicEntry.getKey();
       final Map<String, String> fieldValues = topicEntry.getValue();
       executor.execute(() -> {
         try {
+          LOG.debug("Starting query " + qid);
           StringBuilder sb = new StringBuilder();
           for (String field : args.topicFields) {
             String value = fieldValues.get(field.trim());
@@ -181,15 +194,21 @@ public class LocalSearchCollection<K> implements Closeable {
             }
           }
           String queryString = sb.toString().trim();
+          LOG.debug("Query " + qid + " string: " + queryString);
 
+          LOG.debug("Query " + qid + " - Building query");
           Query query = new BagOfWordsQueryGenerator().buildQuery(IndexArgs.CONTENTS, analyzer, queryString);
+          
+          LOG.debug("Query " + qid + " - Executing search");
           TopDocs topDocs = searcher.search(query, args.hits, BREAK_SCORE_TIES_BY_DOCID, true);
+          LOG.debug("Query " + qid + " - Search returned " + topDocs.scoreDocs.length + " results");
 
           Set<String> docids = new HashSet<>();
           int rank = 1;
           StringBuilder buf = new StringBuilder();
           
           for (ScoreDoc scoreDoc : topDocs.scoreDocs) {
+            LOG.trace("Query " + qid + " - Reading document " + scoreDoc.doc);
             org.apache.lucene.document.Document doc = reader.document(scoreDoc.doc);
             String docid = doc.get(IndexArgs.ID);
             
@@ -223,21 +242,44 @@ public class LocalSearchCollection<K> implements Closeable {
           if (processed % args.reportInterval == 0) {
             LOG.info(String.format("%d queries processed", processed));
           }
-        } catch (IOException e) {
-          throw new RuntimeException("Error processing query " + qid, e);
+          LOG.debug("Query " + qid + " completed successfully");
+        } catch (Exception e) {
+          LOG.error("Error processing query " + qid, e);
+          // Still increment counter so we don't hang forever
+          long processed = processedQueries.incrementAndGet();
+          if (processed % args.reportInterval == 0) {
+            LOG.info(String.format("%d queries processed (with errors)", processed));
+          }
+          // Don't throw - let other queries continue
         }
       });
     }
 
+    LOG.info("All queries submitted. Shutting down executor and waiting for completion...");
     executor.shutdown();
 
     try {
       // Wait for existing tasks to terminate
+      int waitCount = 0;
       while (!executor.awaitTermination(1, TimeUnit.MINUTES)) {
-        LOG.info(String.format("%d queries processed", processedQueries.get()));
+        waitCount++;
+        long processed = processedQueries.get();
+        int activeTasks = executor.getActiveCount();
+        long completedTasks = executor.getCompletedTaskCount();
+        LOG.info(String.format("Waiting... %d queries processed, %d active tasks, %d completed tasks (waited %d minutes)", 
+                 processed, activeTasks, completedTasks, waitCount));
+        
+        // If we've waited a long time and no progress, something is wrong
+        if (waitCount > 10 && processed == 0 && activeTasks == 0) {
+          LOG.warn("No queries have completed after 10 minutes and no active tasks. Forcing shutdown.");
+          executor.shutdownNow();
+          break;
+        }
       }
+      LOG.info("All tasks completed. Final count: " + processedQueries.get() + " queries processed");
     } catch (InterruptedException ie) {
       // (Re-)Cancel if current thread also interrupted
+      LOG.warn("Interrupted while waiting for tasks. Forcing shutdown.");
       executor.shutdownNow();
       // Preserve interrupt status
       Thread.currentThread().interrupt();

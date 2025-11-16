@@ -22,7 +22,7 @@ public class S3BlockCache {
   /**
    * The eviction threshold, if we exceed 1792 MB in heap size we run eviction
    */
-  static final long MAX_HEAP_SIZE = 1024 * 1024 * 1792;
+  static final long MAX_HEAP_SIZE = 1024 * 1024 * 4096;
 
   private final Map<S3FileBlock, CacheBlob> cache;
   /**

@@ -4,7 +4,6 @@ import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
-import com.google.common.collect.MinMaxPriorityQueue;
 import org.apache.commons.io.IOUtils;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
@@ -13,17 +12,43 @@ import org.apache.lucene.store.BufferedIndexInput;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.ByteBuffer;
-import java.util.HashMap;
-import java.util.Map;
 import java.util.PriorityQueue;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 
 public class S3IndexInput extends BufferedIndexInput {
   private static final Logger LOG = LogManager.getLogger(S3IndexInput.class);
   /**
-   * The size of the buffer used by BufferedIndexInput, default to 4 MB
+   * The size of the buffer used by BufferedIndexInput, default to 512 KB
+   * Increased to better match 4MB cache blocks and reduce number of requests
    */
-  private static final int DEFAULT_BUFFER_SIZE = 1024 * 1024 * 4;
+  private static final int DEFAULT_BUFFER_SIZE = 512 * 1024; // 512KB
+  
+  /**
+   * Enable caching only during query execution, not during index opening
+   */
+  private static volatile boolean cachingEnabled = false;
+  
+  /**
+   * Locks to prevent concurrent downloads of the same block
+   */
+  private static final ConcurrentHashMap<S3FileBlock, Object> downloadLocks = new ConcurrentHashMap<>();
+  
+  /**
+   * Enable caching (call this after index is opened, before queries)
+   */
+  public static void enableCaching() {
+    cachingEnabled = true;
+    LOG.info("S3IndexInput caching enabled");
+  }
+  
+  /**
+   * Disable caching (call this during index opening)
+   */
+  public static void disableCaching() {
+    cachingEnabled = false;
+    LOG.info("S3IndexInput caching disabled");
+  }
 
   public static class ReadStats {
     public final AtomicLong readTotal = new AtomicLong();
@@ -35,7 +60,6 @@ public class S3IndexInput extends BufferedIndexInput {
 
   private final AmazonS3 s3Client;
   private final S3ObjectSummary summary;
-  private final S3BlockCache cache;
 
   /**
    * The start offset in the entire file, non-zero in the slice case
@@ -53,7 +77,6 @@ public class S3IndexInput extends BufferedIndexInput {
   public S3IndexInput(AmazonS3 s3Client, S3ObjectSummary summary, long offset, long length, int bufferSize) {
     super(summary.getBucketName() + "/" + summary.getKey(), bufferSize);
     this.s3Client = s3Client;
-    this.cache = S3BlockCache.getInstance();
     this.summary = summary;
     this.off = offset;
     this.end = offset + length;
@@ -97,75 +120,134 @@ public class S3IndexInput extends BufferedIndexInput {
   @Override
   protected void readInternal(ByteBuffer dst) throws IOException {
     final int length = dst.remaining();
-    final int offset = dst.position();
     final long startPos = getFilePointer() + this.off;
-    final long endPos = startPos + length;
 
-    LOG.info("[readInternal][" + summary.getKey() + "] Starting read @ " + startPos + ":" + length);
+    LOG.debug("[readInternal][" + summary.getKey() + "] Reading @ " + startPos + ":" + length + " bytes");
 
     if (startPos + length > end) {
       throw new EOFException("reading past EOF: " + toString() + "@" + hashCode());
     }
 
-    LOG.debug("[read][" + summary.getKey() + "] @" + startPos + ":" + length);
-    final PriorityQueue<S3FileBlock> fileBlocks = S3FileBlock.of(summary, startPos, length);
-    final Map<S3FileBlock, byte[]> cacheBlocks = new HashMap<>();
-    final MinMaxPriorityQueue<S3FileBlock> cacheMisses = MinMaxPriorityQueue.create();
-    for (S3FileBlock fb : fileBlocks) {
-      cacheBlocks.put(fb, cache.getBlock(fb));
-      if (cacheBlocks.get(fb) == null) {
-        cacheMisses.add(fb);
-      }
+    // If caching is disabled (e.g., during index opening), do direct read
+    if (!cachingEnabled) {
+      readDirect(dst, startPos, length);
+      return;
     }
 
-    if (!cacheMisses.isEmpty()) {
-      long downloadStartOffset = cacheMisses.peekFirst().offset;
-      long downloadEndOffset = cacheMisses.peekLast().offset + cacheMisses.peekLast().length();
-      downloadEndOffset = Math.min(summary.getSize(), downloadEndOffset);
-      int downloadLength = Math.toIntExact(downloadEndOffset - downloadStartOffset);
-      PriorityQueue<S3FileBlock> downloadBlocks = S3FileBlock.of(summary, downloadStartOffset, downloadLength);
-
-      LOG.trace("[readFromS3][" + summary.getKey() + "] @" + downloadStartOffset + ":" + downloadLength);
-      GetObjectRequest rangeObjectRequest = new GetObjectRequest(summary.getBucketName(), summary.getKey())
-          .withRange(downloadStartOffset, downloadEndOffset - 1);
-      S3Object object = s3Client.getObject(rangeObjectRequest);
-      stats.readFromS3.addAndGet(downloadLength);
-
-      for (S3FileBlock fb : downloadBlocks) {
-        byte[] data = new byte[fb.length()];
-        int bytesRead = IOUtils.read(object.getObjectContent(), data);
-        if (bytesRead != fb.length()) {
-          throw new IOException("block is not completely filled! fb=" + fb + " bytesRead=" + bytesRead);
-        }
-
-        cache.cacheBlock(fb, data);
-        cacheBlocks.put(fb, data);
-      }
-
-      object.close();
-    }
-
-    int bytesRead = 0;
-    int dstOffset = offset;
-    for (S3FileBlock fb : fileBlocks) {
-      byte[] src = cacheBlocks.get(fb);
-      long blockStart = fb.offset, blockEnd = fb.offset + fb.length();
-      int toRead = Math.toIntExact(Math.min(blockEnd, endPos) - Math.max(blockStart, startPos));
-      int srcOffset = Math.toIntExact(Math.max(0, startPos - blockStart));
+    // Use cache: determine which blocks are needed
+    PriorityQueue<S3FileBlock> blocks = S3FileBlock.of(summary, startPos, length);
+    S3BlockCache cache = S3BlockCache.getInstance();
+    long bytesRead = 0;
+    long readEnd = startPos + length;
+    
+    while (!blocks.isEmpty() && bytesRead < length) {
+      S3FileBlock block = blocks.poll();
       
-      // Use ByteBuffer.put() instead of System.arraycopy()
-      dst.position(dstOffset);
-      dst.put(src, srcOffset, toRead);
-
-      dstOffset += toRead;
-      bytesRead += toRead;
-
-      stats.readTotal.addAndGet(toRead);
+      // Check cache first
+      byte[] blockData = cache.getBlock(block);
+      
+      if (blockData == null) {
+        // Cache miss - synchronize to prevent duplicate downloads
+        Object lock = downloadLocks.computeIfAbsent(block, k -> new Object());
+        synchronized (lock) {
+          // Double-check cache after acquiring lock (another thread might have cached it)
+          blockData = cache.getBlock(block);
+          
+          if (blockData == null) {
+            // Cache miss - download the block
+            LOG.debug("[readFromS3][" + summary.getKey() + "] Cache miss for block " + block.blockIndex + ", downloading");
+            long downloadStart = System.currentTimeMillis();
+            
+            GetObjectRequest rangeRequest = new GetObjectRequest(summary.getBucketName(), summary.getKey())
+                .withRange(block.offset, block.offset + block.length() - 1);
+            
+            try {
+              S3Object object = s3Client.getObject(rangeRequest);
+              blockData = new byte[block.length()];
+              int bytesReadFromS3 = IOUtils.read(object.getObjectContent(), blockData);
+              object.close();
+              
+              if (bytesReadFromS3 != block.length()) {
+                throw new IOException("Expected " + block.length() + " bytes but read " + bytesReadFromS3);
+              }
+              
+              // Cache the block
+              cache.cacheBlock(block, blockData);
+              
+              stats.readFromS3.addAndGet(block.length());
+              
+              long downloadTime = System.currentTimeMillis() - downloadStart;
+              LOG.debug("[readFromS3] Downloaded block " + block.blockIndex + " (" + block.length() + " bytes) in " + 
+                       downloadTime + " ms (" + (block.length() * 1000.0 / downloadTime / 1024 / 1024) + " MB/s)");
+            } catch (Exception e) {
+              long downloadTime = System.currentTimeMillis() - downloadStart;
+              LOG.error("[readFromS3] Failed to download block " + block.blockIndex + " after " + downloadTime + " ms", e);
+              throw e;
+            } finally {
+              // Remove lock after download completes
+              downloadLocks.remove(block);
+            }
+          } else {
+            LOG.trace("[readFromS3][" + summary.getKey() + "] Block " + block.blockIndex + " was cached by another thread");
+          }
+        }
+      } else {
+        LOG.trace("[readFromS3][" + summary.getKey() + "] Cache hit for block " + block.blockIndex);
+      }
+      
+      // Determine the overlap between the read request and this block
+      long blockEnd = block.offset + block.length();
+      long copyStart = Math.max(startPos, block.offset);
+      long copyEnd = Math.min(readEnd, blockEnd);
+      long bytesToCopy = copyEnd - copyStart;
+      
+      if (bytesToCopy > 0) {
+        // Calculate offset within the block
+        int blockOffset = (int)(copyStart - block.offset);
+        dst.put(blockData, blockOffset, (int)bytesToCopy);
+        bytesRead += bytesToCopy;
+      }
     }
-
+    
+    stats.readTotal.addAndGet(length);
+    
     if (bytesRead != length) {
-      throw new IOException("read is not fulfilled completely!" + toString()
-          + " offset=" + offset + " length=" + length + " bytesRead=" + bytesRead);
+      throw new IOException("Expected to read " + length + " bytes but read " + bytesRead);
+    }
+  }
+  
+  /**
+   * Direct S3 read without caching (used when caching is disabled)
+   */
+  private void readDirect(ByteBuffer dst, long startPos, int length) throws IOException {
+    LOG.debug("[readFromS3][" + summary.getKey() + "] Direct read (caching disabled) @" + startPos + ":" + length + " bytes");
+    long downloadStart = System.currentTimeMillis();
+    
+    GetObjectRequest rangeRequest = new GetObjectRequest(summary.getBucketName(), summary.getKey())
+        .withRange(startPos, startPos + length - 1);
+    
+    try {
+      S3Object object = s3Client.getObject(rangeRequest);
+      byte[] buffer = new byte[length];
+      int bytesReadFromS3 = IOUtils.read(object.getObjectContent(), buffer);
+      object.close();
+      
+      if (bytesReadFromS3 != length) {
+        throw new IOException("Expected " + length + " bytes but read " + bytesReadFromS3);
+      }
+      
+      dst.put(buffer);
+      stats.readFromS3.addAndGet(length);
+      stats.readTotal.addAndGet(length);
+      
+      long downloadTime = System.currentTimeMillis() - downloadStart;
+      LOG.debug("[readFromS3] Downloaded " + length + " bytes (direct) in " + downloadTime + " ms (" + 
+               (length * 1000.0 / downloadTime / 1024 / 1024) + " MB/s)");
+    } catch (Exception e) {
+      long downloadTime = System.currentTimeMillis() - downloadStart;
+      LOG.error("[readFromS3] Failed to download direct read @" + startPos + ":" + length + 
+                " after " + downloadTime + " ms", e);
+      throw e;
     }
   }
 
